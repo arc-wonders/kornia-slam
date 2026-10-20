@@ -57,13 +57,9 @@ fn textured(shift: usize) -> Image<u8, 1> {
     synthetic_pair(376, 240, shift).1
 }
 
-fn input(idx: usize, image: &Image<u8, 1>) -> ImageFrame<'_> {
-    ImageFrame {
-        idx,
-        timestamp_sec: idx as f64 * 0.05,
-        image,
-        right_image: None,
-    }
+/// Capture time of the `idx`-th frame, at 20 Hz.
+fn stamp(idx: usize) -> f64 {
+    idx as f64 * 0.05
 }
 
 fn imu_samples() -> Vec<ImuMeasurement> {
@@ -89,7 +85,7 @@ impl Drop for SavedVocabulary {
 /// configuration can name it.
 fn saved_vocabulary(name: &str) -> SavedVocabulary {
     let features = OrbFrontend::new(mono().orb_detector(), &SensorRig::new(camera()))
-        .prepare(&input(0, &textured(0)))
+        .prepare_image(0, &textured(0), None)
         .unwrap()
         .features;
     let descriptors: Vec<_> = features
@@ -184,13 +180,13 @@ fn disabled_imu_input_is_ignored() {
 
     let mut visual = SlamSystem::build(mono(), stereo_imu_rig()).unwrap();
     visual.process_imu(&samples);
-    visual.process_image(input(0, &image)).unwrap();
+    visual.process_image(stamp(0), &image).unwrap();
     assert_eq!(visual.inertial.pending_sample_count(), 0);
 
     let inertial = config(CameraSelection::Mono, true, LoopClosingMode::Disabled);
     let mut inertial = SlamSystem::build(inertial, stereo_imu_rig()).unwrap();
     inertial.process_imu(&samples);
-    inertial.process_image(input(0, &image)).unwrap();
+    inertial.process_image(stamp(0), &image).unwrap();
     assert_eq!(inertial.inertial.pending_sample_count(), samples.len());
 }
 
@@ -201,17 +197,13 @@ fn stereo_input_without_a_right_image_changes_nothing() {
     let samples = imu_samples();
     let image = textured(0);
     system.process_imu(&samples);
-    let err = system.process_image(input(0, &image)).unwrap_err();
-    assert!(matches!(err, ProcessError::MissingRightImage { idx: 0 }));
+    let err = system.process_image(stamp(0), &image).unwrap_err();
+    assert!(matches!(err, ProcessError::StereoRequired));
     assert!(system.previous_image.is_none());
     assert!(system.frontend_observation().keypoints_xy.is_empty());
 
     let right = textured(8);
-    let pair = ImageFrame {
-        right_image: Some(&right),
-        ..input(0, &image)
-    };
-    assert!(system.process_image(pair).is_ok());
+    assert!(system.process_stereo(stamp(0), &image, &right).is_ok());
     assert!(system.frontend_observation().stereo_matched.unwrap() > 0);
 }
 
@@ -247,11 +239,12 @@ fn imu_buffer_stays_bounded_while_bootstrap_keeps_failing() {
         let mut system = SlamSystem::build(config, stereo_imu_rig()).unwrap();
         for idx in 0..400 {
             system.process_imu(&frame_samples(idx));
-            let frame = ImageFrame {
-                right_image: stereo.then_some(&dark),
-                ..input(idx, if stereo { &left } else { &dark })
-            };
-            let result = system.process_image(frame).unwrap();
+            let result = if stereo {
+                system.process_stereo(stamp(idx), &left, &dark)
+            } else {
+                system.process_image(stamp(idx), &dark)
+            }
+            .unwrap();
             assert_eq!(result.status, TrackingStatus::Skipped);
             assert!(
                 system.inertial.pending_sample_count() <= 10,
@@ -267,7 +260,7 @@ fn image_history_follows_successful_frames_only() {
     let mut system = SlamSystem::build(mono(), stereo_imu_rig()).unwrap();
     let (first, second, third) = (textured(0), textured(2), textured(4));
 
-    let result = system.process_image(input(0, &first)).unwrap();
+    let result = system.process_image(stamp(0), &first).unwrap();
     // The first frame only becomes the bootstrap reference, yet still
     // becomes the previous image.
     assert_eq!(result.status, TrackingStatus::Skipped);
@@ -276,21 +269,29 @@ fn image_history_follows_successful_frames_only() {
         first.as_slice()
     );
 
-    let invalid = ImageFrame {
-        timestamp_sec: f64::NAN,
-        ..input(1, &second)
-    };
-    assert!(system.process_image(invalid).is_err());
+    assert!(system.process_image(f64::NAN, &second).is_err());
     assert_eq!(
         system.previous_image.as_ref().unwrap().as_slice(),
         first.as_slice()
     );
 
-    system.process_image(input(2, &third)).unwrap();
+    system.process_image(stamp(2), &third).unwrap();
     assert_eq!(
         system.previous_image.as_ref().unwrap().as_slice(),
         third.as_slice()
     );
+}
+
+#[test]
+fn frames_are_numbered_in_call_order_and_failures_keep_the_number() {
+    let mut system = SlamSystem::build(mono(), stereo_imu_rig()).unwrap();
+    let image = textured(0);
+    assert!(system.process_image(f64::NAN, &image).is_err());
+    assert_eq!(system.next_frame_idx, 0);
+    for expected in 1..=3 {
+        system.process_image(stamp(expected), &image).unwrap();
+        assert_eq!(system.next_frame_idx, expected);
+    }
 }
 
 mod keyframe_evidence {

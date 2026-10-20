@@ -57,8 +57,8 @@ use crate::pose_conversion::apply_reference_pose_correction;
 use build::SystemSettings;
 use kornia_3d::pose::Pose3d;
 use kornia_image::Image;
+use kornia_sensors::SensorRig;
 use kornia_sensors::imu::ImuMeasurement;
-use kornia_sensors::{ImageFrame, SensorRig};
 
 /// Top-level ORB-SLAM system: orchestrates tracking, mapping, and state transitions.
 pub struct SlamSystem {
@@ -85,6 +85,8 @@ pub struct SlamSystem {
     // The last processed image, for optical-flow tracks into the next frame.
     previous_image: Option<Image<u8, 1>>,
     tracking_duration: Duration,
+    // Number given to the next frame; it becomes the keyframe's id in the map.
+    next_frame_idx: usize,
 }
 
 impl SlamSystem {
@@ -130,6 +132,7 @@ impl SlamSystem {
             frontend,
             previous_image: None,
             tracking_duration: Duration::ZERO,
+            next_frame_idx: 0,
         }
     }
 
@@ -144,50 +147,71 @@ impl SlamSystem {
 
     /// Buffers IMU samples for the frames to come, in the body frame. Call it
     /// as samples arrive; each frame uses the samples up to its own
-    /// timestamp, so feed them before the image they close. Samples with a
-    /// non-finite timestamp are ignored, and so are all samples when the rig
-    /// has no IMU.
+    /// timestamp. The caller must feed every sample up to an image's
+    /// timestamp before passing that image: a frame processed ahead of its
+    /// samples predicts from stale ones, and its keyframe's IMU edge stays
+    /// short for good. Samples with a non-finite timestamp are ignored, and so
+    /// are all samples when the rig has no IMU.
     pub fn process_imu(&mut self, samples: &[ImuMeasurement]) {
         if self.rig.imu.is_none() {
             return;
         }
-        self.inertial.buffer_samples(
-            samples
-                .iter()
-                .filter(|sample| sample.timestamp.is_finite())
-                .copied()
-                .collect(),
-        );
+        self.inertial.buffer_samples(samples);
     }
 
-    /// Extracts features from one camera frame and tracks it.
+    /// Extracts features from one image captured at `timestamp_sec` (on the
+    /// IMU samples' clock) and tracks it. The system numbers its frames
+    /// itself, in call order. For a rig with a fisheye model the image is the
+    /// raw fisheye image (see [`SensorRig`]).
     ///
     /// # Errors
     ///
-    /// Invalid input or a feature-extraction failure; the system state,
-    /// including image history, is then unchanged. IMU samples already
-    /// buffered are kept.
-    pub fn process_image(&mut self, input: ImageFrame<'_>) -> Result<TrackingResult, ProcessError> {
-        input::validate(&input, self.rig.stereo_baseline_m.is_some())?;
+    /// Invalid input, a stereo rig (use [`Self::process_stereo`]) or a
+    /// feature-extraction failure; the system state, including image history,
+    /// is then unchanged. IMU samples already buffered are kept.
+    pub fn process_image(
+        &mut self,
+        timestamp_sec: f64,
+        image: &Image<u8, 1>,
+    ) -> Result<TrackingResult, ProcessError> {
+        self.process(timestamp_sec, image, None)
+    }
+
+    /// Like [`Self::process_image`] for a rectified stereo pair. A mono rig
+    /// ignores `right`.
+    pub fn process_stereo(
+        &mut self,
+        timestamp_sec: f64,
+        left: &Image<u8, 1>,
+        right: &Image<u8, 1>,
+    ) -> Result<TrackingResult, ProcessError> {
+        self.process(timestamp_sec, left, Some(right))
+    }
+
+    fn process(
+        &mut self,
+        timestamp_sec: f64,
+        image: &Image<u8, 1>,
+        right_image: Option<&Image<u8, 1>>,
+    ) -> Result<TrackingResult, ProcessError> {
+        input::validate(
+            timestamp_sec,
+            image,
+            right_image,
+            self.rig.stereo_baseline_m.is_some(),
+        )?;
         let frame = self
             .frontend
-            .prepare(&input)
-            .map_err(|source| ProcessError::Frontend {
-                idx: input.idx,
-                source,
-            })?;
+            .prepare_image(self.next_frame_idx, image, right_image)
+            .map_err(ProcessError::Frontend)?;
+        self.next_frame_idx += 1;
         self.report_stereo(&frame);
         // Taken out for the call so tracking can borrow it alongside `self`.
         let previous_image = self.previous_image.take();
         let tracking_start = Instant::now();
-        let result = self.process_prepared(
-            frame,
-            previous_image.as_ref(),
-            input.image,
-            input.timestamp_sec,
-        );
+        let result = self.process_prepared(frame, previous_image.as_ref(), image, timestamp_sec);
         self.tracking_duration = tracking_start.elapsed();
-        self.retain_previous_image(input.image, previous_image);
+        self.retain_previous_image(image, previous_image);
         Ok(result)
     }
 

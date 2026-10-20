@@ -9,7 +9,7 @@ use kornia_algebra::Vec2F64;
 use kornia_image::{Image, ImageError, ImageSize, InterpolationMode};
 use kornia_imgproc::features::{OrbDetector, OrbFeatures};
 use kornia_imgproc::resize::resize_fast_mono;
-use kornia_sensors::{ImageFrame, SensorRig};
+use kornia_sensors::SensorRig;
 
 use crate::Frame;
 use crate::stereo::{StereoMatchConfig, compute_stereo_matches};
@@ -67,14 +67,18 @@ impl OrbFrontend {
         &self.observation
     }
 
-    /// Extracts and prepares the features of a validated input. The
-    /// observation is updated only when preparation succeeds.
-    pub(crate) fn prepare(&mut self, input: &ImageFrame<'_>) -> Result<Frame, ImageError> {
+    /// Extracts and prepares the features of a validated input, numbering the
+    /// frame `idx`. The observation is updated only when preparation succeeds.
+    pub(crate) fn prepare_image(
+        &mut self,
+        idx: usize,
+        image: &Image<u8, 1>,
+        right_image: Option<&Image<u8, 1>>,
+    ) -> Result<Frame, ImageError> {
         let start = Instant::now();
-        let image = input.image;
         let mut features = self.detector.detect_and_extract_u8(image)?;
 
-        let (u_right, depth, stereo_matched) = match (&self.stereo, input.right_image) {
+        let (u_right, depth, stereo_matched) = match (&self.stereo, right_image) {
             (Some(config), Some(right)) => {
                 let right_features = self.detector.detect_and_extract_u8(right)?;
                 let left_pyramid = self.build_pyramid(image)?;
@@ -106,7 +110,7 @@ impl OrbFrontend {
         self.observation.stereo_matched = stereo_matched;
         self.observation.duration = start.elapsed();
         Ok(Frame {
-            idx: input.idx,
+            idx,
             features,
             pose_world_to_cam: Pose3d::IDENTITY,
             image_size: image.size(),

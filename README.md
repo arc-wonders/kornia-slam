@@ -107,7 +107,7 @@ stereo matching and frame history are the system's; sources supply
 synchronized, calibrated (and, for stereo, rectified) images.
 
 ```rust,ignore
-use kornia_slam::{CameraSelection, ImageFrame, SensorSelection, SlamSystem, SystemConfig};
+use kornia_slam::{CameraSelection, SensorSelection, SlamSystem, SystemConfig};
 
 let config = SystemConfig {
     sensors: SensorSelection { cameras: CameraSelection::Stereo, imu: true },
@@ -116,12 +116,7 @@ let config = SystemConfig {
 let mut system = SlamSystem::build(config, rig)?; // rig: kornia_slam::SensorRig
 for (idx, frame) in frames.enumerate() {
     system.process_imu(&frame.imu);
-    let result = system.process_image(ImageFrame {
-        idx,
-        timestamp_sec: frame.timestamp_sec,
-        image: &frame.left,
-        right_image: Some(&frame.right),
-    })?;
+    let result = system.process_stereo(frame.timestamp_sec, &frame.left, &frame.right)?;
     println!("{idx}: {:?} {:?}", result.status, result.pose_world_to_cam);
 }
 ```
