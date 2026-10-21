@@ -150,8 +150,9 @@ impl SlamSystem {
     /// timestamp. The caller must feed every sample up to an image's
     /// timestamp before passing that image: a frame processed ahead of its
     /// samples predicts from stale ones, and its keyframe's IMU edge stays
-    /// short for good. Samples with a non-finite timestamp are ignored, and so
-    /// are all samples when the rig has no IMU.
+    /// short for good. Samples with a non-finite timestamp or more than 30 s
+    /// ahead of the latest image are ignored, and so are all samples when the
+    /// rig has no IMU.
     pub fn process_imu(&mut self, samples: &[ImuMeasurement]) {
         if self.rig.imu.is_none() {
             return;
@@ -205,6 +206,7 @@ impl SlamSystem {
             .prepare_image(self.next_frame_idx, image, right_image)
             .map_err(ProcessError::Frontend)?;
         self.next_frame_idx += 1;
+        self.inertial.latest_image_timestamp_sec = Some(timestamp_sec);
         self.report_stereo(&frame);
         // Taken out for the call so tracking can borrow it alongside `self`.
         let previous_image = self.previous_image.take();

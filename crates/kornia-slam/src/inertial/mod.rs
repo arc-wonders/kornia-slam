@@ -20,8 +20,9 @@ use crate::mapping::map::{ImuFactor, InertialAlignmentError};
 use kornia_algebra::Vec3F64;
 use kornia_sensors::imu::{GRAVITY_MAGNITUDE, ImuBias, ImuCalib, ImuMeasurement, PreintegratedImu};
 
-/// Longest span of IMU samples kept while no frame prunes them, well beyond
-/// the gap between keyframes.
+/// Longest span of IMU samples kept while no keyframe prunes them, well beyond
+/// the gap between keyframes. Also how far ahead of the latest image a sample
+/// may be before it is taken for a clock glitch.
 const MAX_BUFFERED_SEC: f64 = 30.0;
 
 pub(crate) struct InertialState {
@@ -30,6 +31,9 @@ pub(crate) struct InertialState {
     /// Timestamp of the frame the map was bootstrapped from.
     pub(crate) bootstrap_timestamp_sec: Option<f64>,
     pub(crate) last_keyframe_timestamp_sec: Option<f64>,
+    /// Reference for the buffer's age window, so that a single far-off IMU
+    /// timestamp cannot move it.
+    pub(crate) latest_image_timestamp_sec: Option<f64>,
     pub(crate) initializer: ImuInitializer,
     pub(crate) schedule: InertialInitSchedule,
     pending_samples: VecDeque<ImuMeasurement>,
@@ -42,6 +46,7 @@ impl InertialState {
             gravity_world: Vec3F64::new(0.0, 0.0, -GRAVITY_MAGNITUDE),
             bootstrap_timestamp_sec: None,
             last_keyframe_timestamp_sec: None,
+            latest_image_timestamp_sec: None,
             // Matches ORB-SLAM3's LocalMapping::InitializeIMU VIBA0 gate
             // (nMinKF=10; minTime=1.0s stereo/2.0s mono — `ready()` doubles
             // this for mono).
@@ -56,22 +61,30 @@ impl InertialState {
     }
 
     /// Inserts samples in time order, then drops those more than
-    /// [`MAX_BUFFERED_SEC`] older than the newest, so a camera that stops
-    /// delivering frames cannot grow the buffer without bound.
+    /// [`MAX_BUFFERED_SEC`] older than the latest image (the newest sample
+    /// before the first image). Samples more than that ahead of the latest
+    /// image are rejected, so a camera that stops delivering frames cannot grow
+    /// the buffer without bound.
     pub(crate) fn buffer_samples(&mut self, samples: &[ImuMeasurement]) {
-        for sample in samples.iter().filter(|m| m.timestamp.is_finite()).copied() {
+        let image_ts = self.latest_image_timestamp_sec;
+        for sample in samples
+            .iter()
+            .filter(|m| m.timestamp.is_finite())
+            .filter(|m| image_ts.is_none_or(|t| m.timestamp <= t + MAX_BUFFERED_SEC))
+            .copied()
+        {
             let at = self
                 .pending_samples
                 .partition_point(|m| m.timestamp <= sample.timestamp);
             self.pending_samples.insert(at, sample);
         }
-        let Some(newest) = self.pending_samples.back().map(|m| m.timestamp) else {
+        let Some(reference) = image_ts.or(self.pending_samples.back().map(|m| m.timestamp)) else {
             return;
         };
         while self
             .pending_samples
             .front()
-            .is_some_and(|m| m.timestamp < newest - MAX_BUFFERED_SEC)
+            .is_some_and(|m| m.timestamp < reference - MAX_BUFFERED_SEC)
         {
             self.pending_samples.pop_front();
         }
@@ -219,6 +232,34 @@ mod tests {
         assert!(times.windows(2).all(|w| w[0] <= w[1]));
         assert!(times.iter().all(|&t| t >= newest - MAX_BUFFERED_SEC));
         assert!(times.len() <= 2 * (MAX_BUFFERED_SEC * 100.0) as usize + 2);
+    }
+
+    /// A glitched far-future timestamp must not become the age-window
+    /// reference and flush every later sample.
+    #[test]
+    fn a_far_future_sample_does_not_flush_later_samples() {
+        let mut state = InertialState::new();
+        state.latest_image_timestamp_sec = Some(0.0);
+        state.buffer_samples(&[sample(1e6)]);
+        for i in 0..100 {
+            state.buffer_samples(&[sample(i as f64 * 0.01)]);
+        }
+        let times: Vec<f64> = state.pending_samples.iter().map(|m| m.timestamp).collect();
+        assert_eq!(times.len(), 100);
+        assert!(times.iter().all(|&t| t < 1.0));
+    }
+
+    #[test]
+    fn a_stalled_camera_keeps_the_buffer_bounded() {
+        let mut state = InertialState::new();
+        state.latest_image_timestamp_sec = Some(0.0);
+        let count = (3.0 * MAX_BUFFERED_SEC * 100.0) as usize;
+        for i in 0..count {
+            state.buffer_samples(&[sample(i as f64 * 0.01)]);
+        }
+        let kept = state.pending_sample_count();
+        assert!(kept <= (MAX_BUFFERED_SEC * 100.0) as usize + 1, "{kept}");
+        assert!(kept > (MAX_BUFFERED_SEC * 100.0) as usize - 2, "{kept}");
     }
 
     /// Windows overlap by design, and the samples handed to a map factor must
