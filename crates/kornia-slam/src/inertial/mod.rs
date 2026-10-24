@@ -65,7 +65,7 @@ impl InertialState {
     /// before the first image). Samples more than that ahead of the latest
     /// image are rejected, so a camera that stops delivering frames cannot grow
     /// the buffer without bound.
-    pub(crate) fn buffer_samples(&mut self, samples: &[ImuMeasurement]) {
+    pub(crate) fn insert_buffer_samples(&mut self, samples: &[ImuMeasurement]) {
         let image_ts = self.latest_image_timestamp_sec;
         for sample in samples
             .iter()
@@ -211,7 +211,7 @@ mod tests {
         let mut state = InertialState::new();
         let count = (3.0 * MAX_BUFFERED_SEC * 100.0) as usize;
         for i in 0..count {
-            state.buffer_samples(&[sample(i as f64 * 0.01)]);
+            state.insert_buffer_samples(&[sample(i as f64 * 0.01)]);
         }
         let kept = state.pending_sample_count();
         assert!(kept <= (MAX_BUFFERED_SEC * 100.0) as usize + 1, "{kept}");
@@ -225,7 +225,7 @@ mod tests {
         for i in 0..count {
             let t = i as f64 * 0.01;
             // A sample far ahead first, then a late one behind the newest.
-            state.buffer_samples(&[sample(t + 0.004), sample(t)]);
+            state.insert_buffer_samples(&[sample(t + 0.004), sample(t)]);
         }
         let times: Vec<f64> = state.pending_samples.iter().map(|m| m.timestamp).collect();
         let newest = *times.last().unwrap();
@@ -240,9 +240,9 @@ mod tests {
     fn a_far_future_sample_does_not_flush_later_samples() {
         let mut state = InertialState::new();
         state.latest_image_timestamp_sec = Some(0.0);
-        state.buffer_samples(&[sample(1e6)]);
+        state.insert_buffer_samples(&[sample(1e6)]);
         for i in 0..100 {
-            state.buffer_samples(&[sample(i as f64 * 0.01)]);
+            state.insert_buffer_samples(&[sample(i as f64 * 0.01)]);
         }
         let times: Vec<f64> = state.pending_samples.iter().map(|m| m.timestamp).collect();
         assert_eq!(times.len(), 100);
@@ -255,7 +255,7 @@ mod tests {
         state.latest_image_timestamp_sec = Some(0.0);
         let count = (3.0 * MAX_BUFFERED_SEC * 100.0) as usize;
         for i in 0..count {
-            state.buffer_samples(&[sample(i as f64 * 0.01)]);
+            state.insert_buffer_samples(&[sample(i as f64 * 0.01)]);
         }
         let kept = state.pending_sample_count();
         assert!(kept <= (MAX_BUFFERED_SEC * 100.0) as usize + 1, "{kept}");
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn overlapping_windows_survive_preintegration_and_keep_the_pruning_boundary() {
         let mut state = InertialState::new();
-        state.buffer_samples(&[sample(0.0), sample(0.5), sample(1.0), sample(1.5)]);
+        state.insert_buffer_samples(&[sample(0.0), sample(0.5), sample(1.0), sample(1.5)]);
 
         let (_, first) = state.preintegrate_window(noise(), 0.0, 1.0);
         let (_, overlapping) = state.preintegrate_window(noise(), 0.5, 1.5);
@@ -297,7 +297,7 @@ mod tests {
         let mut state = InertialState::new();
         state.bias.gyro = Vec3F64::new(0.01, 0.02, 0.03);
         state.bias.accel = Vec3F64::new(0.1, 0.2, 0.3);
-        state.buffer_samples(&[sample(0.0), sample(0.5)]);
+        state.insert_buffer_samples(&[sample(0.0), sample(0.5)]);
 
         let (pre, _) = state.preintegrate_window(noise(), 0.0, 0.5);
 
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn a_keyframe_edge_needs_a_window_with_time_in_it() {
         let mut state = InertialState::new();
-        state.buffer_samples(&[sample(0.0), sample(0.5), sample(1.0)]);
+        state.insert_buffer_samples(&[sample(0.0), sample(0.5), sample(1.0)]);
 
         assert!(state.keyframe_edge(noise(), 1, 2, 1.0, 1.0).is_none());
 
