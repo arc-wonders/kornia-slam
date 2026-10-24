@@ -157,7 +157,7 @@ impl SlamSystem {
         if self.rig.imu.is_none() {
             return;
         }
-        self.inertial.buffer_samples(samples);
+        self.inertial.insert_buffer_samples(samples);
     }
 
     /// Extracts features from one image captured at `timestamp_sec` (on the
@@ -175,7 +175,15 @@ impl SlamSystem {
         timestamp_sec: f64,
         image: &Image<u8, 1>,
     ) -> Result<TrackingResult, ProcessError> {
-        self.process(timestamp_sec, image, None)
+        input::validate_image(timestamp_sec, image)?;
+        if self.rig.stereo_baseline_m.is_some() {
+            return Err(ProcessError::StereoRequired);
+        }
+        let frame = self
+            .frontend
+            .prepare_image(self.next_frame_idx, image)
+            .map_err(ProcessError::Frontend)?;
+        Ok(self.track_frame(frame, image, timestamp_sec))
     }
 
     /// Like [`Self::process_image`] for a rectified stereo pair. A mono rig
@@ -186,25 +194,24 @@ impl SlamSystem {
         left: &Image<u8, 1>,
         right: &Image<u8, 1>,
     ) -> Result<TrackingResult, ProcessError> {
-        self.process(timestamp_sec, left, Some(right))
-    }
-
-    fn process(
-        &mut self,
-        timestamp_sec: f64,
-        image: &Image<u8, 1>,
-        right_image: Option<&Image<u8, 1>>,
-    ) -> Result<TrackingResult, ProcessError> {
-        input::validate(
-            timestamp_sec,
-            image,
-            right_image,
-            self.rig.stereo_baseline_m.is_some(),
-        )?;
+        if self.rig.stereo_baseline_m.is_none() {
+            return self.process_image(timestamp_sec, left);
+        }
+        input::validate_stereo_pair(timestamp_sec, left, right)?;
         let frame = self
             .frontend
-            .prepare_image(self.next_frame_idx, image, right_image)
+            .prepare_stereo_pair(self.next_frame_idx, left, right)
             .map_err(ProcessError::Frontend)?;
+        Ok(self.track_frame(frame, left, timestamp_sec))
+    }
+
+    /// Takes a prepared frame as the next one and tracks it.
+    fn track_frame(
+        &mut self,
+        frame: Frame,
+        image: &Image<u8, 1>,
+        timestamp_sec: f64,
+    ) -> TrackingResult {
         self.next_frame_idx += 1;
         self.inertial.latest_image_timestamp_sec = Some(timestamp_sec);
         self.report_stereo(&frame);
@@ -214,7 +221,7 @@ impl SlamSystem {
         let result = self.process_prepared(frame, previous_image.as_ref(), image, timestamp_sec);
         self.tracking_duration = tracking_start.elapsed();
         self.retain_previous_image(image, previous_image);
-        Ok(result)
+        result
     }
 
     /// Time the latest successfully processed frame spent in tracking and

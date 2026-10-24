@@ -21,28 +21,27 @@ pub enum ProcessError {
     Frontend(#[source] ImageError),
 }
 
-/// Checks the input before any system state is touched. `stereo` is whether
-/// the pipeline selected stereo cameras; a right image for a mono pipeline is
-/// ignored.
-pub(crate) fn validate(
-    timestamp_sec: f64,
-    image: &Image<u8, 1>,
-    right_image: Option<&Image<u8, 1>>,
-    stereo: bool,
-) -> Result<(), ProcessError> {
+/// Checks one image before any system state is touched.
+pub(crate) fn validate_image(timestamp_sec: f64, image: &Image<u8, 1>) -> Result<(), ProcessError> {
     if !timestamp_sec.is_finite() {
         return Err(ProcessError::NonFiniteTimestamp { timestamp_sec });
     }
     if is_empty(image.size()) {
         return Err(ProcessError::EmptyImage);
     }
-    if !stereo {
-        return Ok(());
-    }
-    let right = right_image.ok_or(ProcessError::StereoRequired)?;
-    if right.size() != image.size() {
+    Ok(())
+}
+
+/// Checks a stereo pair before any system state is touched.
+pub(crate) fn validate_stereo_pair(
+    timestamp_sec: f64,
+    left: &Image<u8, 1>,
+    right: &Image<u8, 1>,
+) -> Result<(), ProcessError> {
+    validate_image(timestamp_sec, left)?;
+    if right.size() != left.size() {
         return Err(ProcessError::StereoSizeMismatch {
-            left: image.size(),
+            left: left.size(),
             right: right.size(),
         });
     }
@@ -62,31 +61,24 @@ mod tests {
     }
 
     #[test]
-    fn mono_input_ignores_the_right_image() {
-        let (left, right) = (image(8, 6), image(4, 4));
-        assert!(validate(1.0, &left, None, false).is_ok());
-        assert!(validate(1.0, &left, Some(&right), false).is_ok());
-    }
-
-    #[test]
     fn stereo_input_needs_a_matching_right_image() {
         let (left, right, small) = (image(8, 6), image(8, 6), image(4, 4));
-        assert!(validate(1.0, &left, Some(&right), true).is_ok());
+        assert!(validate_stereo_pair(1.0, &left, &right).is_ok());
         assert!(matches!(
-            validate(1.0, &left, None, true),
-            Err(ProcessError::StereoRequired)
-        ));
-        assert!(matches!(
-            validate(1.0, &left, Some(&small), true),
+            validate_stereo_pair(1.0, &left, &small),
             Err(ProcessError::StereoSizeMismatch { .. })
         ));
     }
 
     #[test]
     fn rejects_empty_images() {
-        let empty = image(0, 6);
+        let (empty, right) = (image(0, 6), image(0, 6));
         assert!(matches!(
-            validate(1.0, &empty, None, false),
+            validate_image(1.0, &empty),
+            Err(ProcessError::EmptyImage)
+        ));
+        assert!(matches!(
+            validate_stereo_pair(1.0, &empty, &right),
             Err(ProcessError::EmptyImage)
         ));
     }
@@ -96,7 +88,7 @@ mod tests {
         let left = image(8, 6);
         for timestamp_sec in [f64::NAN, f64::INFINITY] {
             assert!(matches!(
-                validate(timestamp_sec, &left, None, false),
+                validate_image(timestamp_sec, &left),
                 Err(ProcessError::NonFiniteTimestamp { .. })
             ));
         }

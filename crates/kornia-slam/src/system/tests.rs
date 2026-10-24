@@ -85,7 +85,7 @@ impl Drop for SavedVocabulary {
 /// configuration can name it.
 fn saved_vocabulary(name: &str) -> SavedVocabulary {
     let features = OrbFrontend::new(mono().orb_detector(), &SensorRig::new(camera()))
-        .prepare_image(0, &textured(0), None)
+        .prepare_image(0, &textured(0))
         .unwrap()
         .features;
     let descriptors: Vec<_> = features
@@ -205,6 +205,25 @@ fn stereo_input_without_a_right_image_changes_nothing() {
     let right = textured(8);
     assert!(system.process_stereo(stamp(0), &image, &right).is_ok());
     assert!(system.frontend_observation().stereo_matched.unwrap() > 0);
+}
+
+#[test]
+fn a_mono_pipeline_ignores_the_right_image() {
+    let mut system = SlamSystem::build(mono(), stereo_imu_rig()).unwrap();
+    let small = Image::from_size_val(
+        ImageSize {
+            width: 4,
+            height: 4,
+        },
+        0,
+    )
+    .unwrap();
+    assert!(
+        system
+            .process_stereo(stamp(0), &textured(0), &small)
+            .is_ok()
+    );
+    assert!(system.frontend_observation().stereo_matched.is_none());
 }
 
 /// A rig that never bootstraps (a dark room) inserts no keyframe, yet must
