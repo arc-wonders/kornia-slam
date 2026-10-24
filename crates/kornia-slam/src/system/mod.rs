@@ -186,18 +186,18 @@ impl SlamSystem {
         Ok(self.track_frame(frame, image, timestamp_sec))
     }
 
-    /// Like [`Self::process_image`] for a rectified stereo pair. A mono rig
-    /// ignores `right`.
+    /// Like [`Self::process_image`] for a rectified stereo pair; a mono
+    /// pipeline rejects it (use [`Self::process_image`]).
     pub fn process_stereo(
         &mut self,
         timestamp_sec: f64,
         left: &Image<u8, 1>,
         right: &Image<u8, 1>,
     ) -> Result<TrackingResult, ProcessError> {
-        if self.rig.stereo_baseline_m.is_none() {
-            return self.process_image(timestamp_sec, left);
-        }
         input::validate_stereo_pair(timestamp_sec, left, right)?;
+        if self.rig.stereo_baseline_m.is_none() {
+            return Err(ProcessError::MonoPipeline);
+        }
         let frame = self
             .frontend
             .prepare_stereo_pair(self.next_frame_idx, left, right)

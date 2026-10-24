@@ -208,22 +208,13 @@ fn stereo_input_without_a_right_image_changes_nothing() {
 }
 
 #[test]
-fn a_mono_pipeline_ignores_the_right_image() {
+fn a_mono_pipeline_rejects_a_stereo_pair() {
     let mut system = SlamSystem::build(mono(), stereo_imu_rig()).unwrap();
-    let small = Image::from_size_val(
-        ImageSize {
-            width: 4,
-            height: 4,
-        },
-        0,
-    )
-    .unwrap();
-    assert!(
-        system
-            .process_stereo(stamp(0), &textured(0), &small)
-            .is_ok()
-    );
-    assert!(system.frontend_observation().stereo_matched.is_none());
+    let (left, right) = (textured(0), textured(8));
+    let err = system.process_stereo(stamp(0), &left, &right).unwrap_err();
+    assert!(matches!(err, ProcessError::MonoPipeline));
+    assert!(system.previous_image.is_none());
+    assert!(system.frontend_observation().keypoints_xy.is_empty());
 }
 
 /// A rig that never bootstraps (a dark room) inserts no keyframe, yet must
